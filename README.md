@@ -53,6 +53,39 @@ python -m cocog server config.yaml
 python -m cocog client
 ```
 
+### Android Client
+
+An Android app is included in `android/` that captures mic audio and streams it
+directly to the co-cog server over WebSocket. No Python needed on the phone.
+
+**Prerequisites:** Android SDK (command-line tools or Android Studio), Java 17+
+
+```bash
+cd android
+
+# Generate Gradle wrapper (first time only)
+gradle wrapper --gradle-version 8.9
+
+# Set your Android SDK path
+echo "sdk.dir=$HOME/Android/Sdk" > local.properties
+
+# Build debug APK
+./gradlew assembleDebug
+```
+
+The APK will be at `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+**Install on phone** (USB debugging enabled):
+
+```bash
+adb install app/build/outputs/apk/debug/app-debug.apk
+```
+
+Open "Co-Cog Mic", enter your server's IP (e.g. `ws://192.168.1.50:9090`),
+and tap Start. The phone and server must be on the same LAN.
+
+Audio format: 16kHz mono 16-bit PCM, 0.5s chunks — matches the server config.
+
 **Environment overrides** (useful for testing):
 
 ```bash
