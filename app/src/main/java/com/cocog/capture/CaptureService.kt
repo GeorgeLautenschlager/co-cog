@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import androidx.annotation.VisibleForTesting
 
 /**
  * Foreground microphone-service skeleton. T1 scope: it must REFUSE to start while
@@ -23,6 +24,14 @@ class CaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (!Permissions.hasAll(this)) {
             // Refuse: do not go foreground, do not open the mic, self-stop.
+            //
+            // Contract (T1): this refusal path assumes the service was started with a
+            // plain startService(). It must NOT be launched via startForegroundService()
+            // while half-permissioned — that path requires a startForeground() call within
+            // ~5s, but a microphone-typed startForeground() itself requires RECORD_AUDIO,
+            // so there is no valid foreground call to make when half-permissioned. The
+            // onboarding gate enforces this (the Start affordance only appears fully
+            // permissioned). T2, which wires the real service start, owns hardening this.
             lastStartRefused = true
             metrics.event(
                 "capture_start_refused",
@@ -70,10 +79,12 @@ class CaptureService : Service() {
         /**
          * Set true when the most recent start attempt was refused for being
          * half-permissioned. Exposed so an instrumented test can verify the D18
-         * refusal contract without opening the microphone.
+         * refusal contract without opening the microphone. Single-shot test aid —
+         * reflects only the last start; not a general-purpose signal.
          */
         @JvmStatic
         @Volatile
+        @VisibleForTesting
         var lastStartRefused: Boolean = false
     }
 }
