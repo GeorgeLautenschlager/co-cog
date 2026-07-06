@@ -1,108 +1,96 @@
 package com.cocog.capture.state
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class StateMachineTest {
 
     private val stateMachine = StateMachine()
 
     @Test
-    fun test_stop_from_any_state() {
+    fun test_exhaustive_transitions() {
         val states = CaptureState.values()
+        val events = listOf(
+            CaptureEvent.Start,
+            CaptureEvent.Stop,
+            CaptureEvent.Mute,
+            CaptureEvent.Unmute,
+            CaptureEvent.MicContentionDetected,
+            CaptureEvent.MicContentionResolved,
+            CaptureEvent.ThermalSevere,
+            CaptureEvent.ThermalRecovered
+        )
+
         for (state in states) {
-            val result = stateMachine.transition(state, CaptureEvent.Stop)
-            assertTrue("Expected Success for Stop from $state", result is TransitionResult.Success)
-            assertEquals(CaptureState.STOPPED, (result as TransitionResult.Success).newState)
+            for (event in events) {
+                val expected = getExpectedResult(state, event)
+                val actual = stateMachine.transition(state, event)
+                assertEquals("Failed for $state + $event", expected, actual)
+            }
+        }
+    }
+
+    private fun getExpectedResult(state: CaptureState, event: CaptureEvent): TransitionResult {
+        // Global rules first
+        if (event is CaptureEvent.Stop) return TransitionResult.Success(CaptureState.STOPPED)
+        if (event is CaptureEvent.Mute && state != CaptureState.STOPPED) return TransitionResult.Success(CaptureState.MUTED)
+
+        return when (state) {
+            CaptureState.STOPPED -> when (event) {
+                is CaptureEvent.Start -> TransitionResult.Success(CaptureState.CAPTURING)
+                else -> TransitionResult.IllegalTransition(state, event)
+            }
+            CaptureState.CAPTURING -> when (event) {
+                is CaptureEvent.MicContentionDetected -> TransitionResult.Success(CaptureState.SUSPENDED)
+                is CaptureEvent.ThermalSevere -> TransitionResult.Success(CaptureState.THROTTLED)
+                else -> TransitionResult.IllegalTransition(state, event)
+            }
+            CaptureState.MUTED -> when (event) {
+                is CaptureEvent.Unmute -> TransitionResult.Success(CaptureState.CAPTURING)
+                else -> TransitionResult.IllegalTransition(state, event)
+            }
+            CaptureState.SUSPENDED -> when (event) {
+                is CaptureEvent.MicContentionResolved -> TransitionResult.Success(CaptureState.CAPTURING)
+                else -> TransitionResult.IllegalTransition(state, event)
+            }
+            CaptureState.THROTTLED -> when (event) {
+                is CaptureEvent.ThermalRecovered -> TransitionResult.Success(CaptureState.CAPTURING)
+                else -> TransitionResult.IllegalTransition(state, event)
+            }
+        }
+    }
+
+    @Test
+    fun test_no_android_references() {
+        // The Test task working directory is the module dir (app/)
+        val root = File("src/main/java/com/cocog/capture/state")
+        assertTrue("State package directory not found: ${root.absolutePath}", root.exists())
+
+        root.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
+            val content = file.readText()
+            assertFalse("File ${file.name} contains 'android.' reference!", content.contains("android."))
         }
     }
 
     @Test
     fun test_mute_wins_property() {
-        val states = listOf(CaptureState.CAPTURING, CaptureState.SUSPENDED, CaptureState.THROTTLED)
+        // Mute should work from any state except STOPPED (as per StateMachine logic)
+        val states = listOf(CaptureState.CAPTURING, CaptureState.MUTED, CaptureState.SUSPENDED, CaptureState.THROTTLED)
         for (state in states) {
             val result = stateMachine.transition(state, CaptureEvent.Mute)
-            assertTrue("Expected Success for Mute from $state", result is TransitionResult.Success)
-            assertEquals(CaptureState.MUTED, (result as TransitionResult.Success).newState)
+            assertEquals("Expected Success for Mute from $state", TransitionResult.Success(CaptureState.MUTED), result)
         }
     }
 
     @Test
-    fun test_muted_stays_muted_on_other_events() {
-        val states = listOf(
-            CaptureEvent.MicContentionResolved,
-            CaptureEvent.ThermalRecovered,
-            CaptureEvent.Start,
-            CaptureEvent.MicContentionDetected,
-            CaptureEvent.ThermalSevere
-        )
-        for (event in states) {
-            val result = stateMachine.transition(CaptureState.MUTED, event)
-            assertTrue("Expected IllegalTransition for $event while MUTED", result is TransitionResult.IllegalTransition)
-            assertEquals(CaptureState.MUTED, (result as TransitionResult.IllegalTransition).currentState)
+    fun test_stop_from_any_state() {
+        val states = CaptureState.values()
+        for (state in states) {
+            val result = stateMachine.transition(state, CaptureEvent.Stop)
+            assertEquals("Expected Success for Stop from $state", TransitionResult.Success(CaptureState.STOPPED), result)
         }
-    }
-
-    @Test
-    fun test_unmute_from_muted() {
-        val result = stateMachine.transition(CaptureState.MUTED, CaptureEvent.Unmute)
-        assertTrue("Expected Success for Unmute from MUTED", result is TransitionResult.Success)
-        assertEquals(CaptureState.CAPTURING, (result as TransitionResult.Success).newState)
-    }
-
-    @Test
-    fun test_start_from_stopped() {
-        val result = stateMachine.transition(CaptureState.STOPPED, CaptureEvent.Start)
-        assertTrue("Expected Success for Start from STOPPED", result is TransitionResult.Success)
-        assertEquals(CaptureState.CAPTURING, (result as TransitionResult.Success).newState)
-    }
-
-    @Test
-    fun test_capture_transitions() {
-        // Mic Contention
-        val res1 = stateMachine.transition(CaptureState.CAPTURING, CaptureEvent.MicContentionDetected)
-        assertTrue(res1 is TransitionResult.Success && res1.newState == CaptureState.SUSPENDED)
-
-        // Thermal Severe
-        val res2 = stateMachine.transition(CaptureState.CAPTURING, CaptureEvent.ThermalSevere)
-        assertTrue(res2 is TransitionResult.Success && res2.newState == CaptureState.THROTTLED)
-    }
-
-    @Test
-    fun test_suspended_transitions() {
-        val result = stateMachine.transition(CaptureState.SUSPENDED, CaptureEvent.MicContentionResolved)
-        assertTrue("Expected Success for MicContentionResolved from SUSPENDED", result is TransitionResult.Success)
-        assertEquals(CaptureState.CAPTURING, (result as TransitionResult.Success).newState)
-    }
-
-    @Test
-    fun test_throttled_transitions() {
-        val result = stateMachine.transition(CaptureState.THROTTLED, CaptureEvent.ThermalRecovered)
-        assertTrue("Expected Success for ThermalRecovered from THROTTLED", result is TransitionResult.Success)
-        assertEquals(CaptureState.CAPTURING, (result as TransitionResult.Success).newState)
-    }
-
-    @Test
-    fun test_illegal_transitions() {
-        // Start from CAPTURING
-        val res1 = stateMachine.transition(CaptureState.CAPTURING, CaptureEvent.Start)
-        assertTrue(res1 is TransitionResult.IllegalTransition)
-
-        // Unmute from STOPPED
-        val res2 = stateMachine.transition(CaptureState.STOPPED, CaptureEvent.Unmute)
-        assertTrue(res2 is TransitionResult.IllegalTransition)
-
-        // MicContentionResolved from CAPTURING (it's a no-op if already capturing, but we treat it as illegal transition in our table)
-        val res3 = stateMachine.transition(CaptureState.CAPTURING, CaptureEvent.MicContentionResolved)
-        assertTrue(res3 is TransitionResult.IllegalTransition)
-    }
-
-    @Test
-    fun test_no_android_imports() {
-        val fileContent = java.io.File("src/main/java/com/cocog/capture/state/CaptureState.kt").readText()
-        // Check for any android.* imports
-        val hasAndroidImports = "import android.".toRegex().containsMatchIn(fileContent)
-        assertTrue("Module contains android.* imports!", !hasAndroidImports)
     }
 }
