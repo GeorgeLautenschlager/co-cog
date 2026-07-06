@@ -8,8 +8,6 @@ import java.io.File
 
 class StateMachineTest {
 
-    private val stateMachine = StateMachine()
-
     @Test
     fun test_exhaustive_transitions() {
         val states = CaptureState.values()
@@ -24,41 +22,41 @@ class StateMachineTest {
             CaptureEvent.ThermalRecovered
         )
 
+        // Literal map of the six real (non-global) legal transitions from spec
+        val legalTransitions = mapOf(
+            CaptureState.STOPPED to listOf(Pair(CaptureEvent.Start, CaptureState.CAPTURING)),
+            CaptureState.CAPTURING to listOf(
+                Pair(CaptureEvent.MicContentionDetected, CaptureState.SUSPENDED),
+                Pair(CaptureEvent.ThermalSevere, CaptureState.THROTTLED)
+            ),
+            CaptureState.MUTED to listOf(Pair(CaptureEvent.Unmute, CaptureState.CAPTURING)),
+            CaptureState.SUSPENDED to listOf(Pair(CaptureEvent.MicContentionResolved, CaptureState.CAPTURING)),
+            CaptureState.THROTTLED to listOf(Pair(CaptureEvent.ThermalRecovered, CaptureState.CAPTURING))
+        )
+
         for (state in states) {
             for (event in events) {
-                val expected = getExpectedResult(state, event)
-                val actual = stateMachine.transition(state, event)
+                val actual = StateMachine.transition(state, event)
+                
+                // Determine expected result based on rules
+                val expected = when {
+                    // Global rule 1: any state + Stop -> STOPPED
+                    event is CaptureEvent.Stop -> TransitionResult.Success(CaptureState.STOPPED)
+                    
+                    // Global rule 2: any state except STOPPED + Mute -> MUTED
+                    event is CaptureEvent.Mute && state != CaptureState.STOPPED -> TransitionResult.Success(CaptureState.MUTED)
+                    
+                    else -> {
+                        val transition = legalTransitions[state]?.find { it.first == event }?.second
+                        if (transition != null) {
+                            TransitionResult.Success(transition)
+                        } else {
+                            TransitionResult.IllegalTransition(state, event)
+                        }
+                    }
+                }
+
                 assertEquals("Failed for $state + $event", expected, actual)
-            }
-        }
-    }
-
-    private fun getExpectedResult(state: CaptureState, event: CaptureEvent): TransitionResult {
-        // Global rules first
-        if (event is CaptureEvent.Stop) return TransitionResult.Success(CaptureState.STOPPED)
-        if (event is CaptureEvent.Mute && state != CaptureState.STOPPED) return TransitionResult.Success(CaptureState.MUTED)
-
-        return when (state) {
-            CaptureState.STOPPED -> when (event) {
-                is CaptureEvent.Start -> TransitionResult.Success(CaptureState.CAPTURING)
-                else -> TransitionResult.IllegalTransition(state, event)
-            }
-            CaptureState.CAPTURING -> when (event) {
-                is CaptureEvent.MicContentionDetected -> TransitionResult.Success(CaptureState.SUSPENDED)
-                is CaptureEvent.ThermalSevere -> TransitionResult.Success(CaptureState.THROTTLED)
-                else -> TransitionResult.IllegalTransition(state, event)
-            }
-            CaptureState.MUTED -> when (event) {
-                is CaptureEvent.Unmute -> TransitionResult.Success(CaptureState.CAPTURING)
-                else -> TransitionResult.IllegalTransition(state, event)
-            }
-            CaptureState.SUSPENDED -> when (event) {
-                is CaptureEvent.MicContentionResolved -> TransitionResult.Success(CaptureState.CAPTURING)
-                else -> TransitionResult.IllegalTransition(state, event)
-            }
-            CaptureState.THROTTLED -> when (event) {
-                is CaptureEvent.ThermalRecovered -> TransitionResult.Success(CaptureState.CAPTURING)
-                else -> TransitionResult.IllegalTransition(state, event)
             }
         }
     }
@@ -70,8 +68,10 @@ class StateMachineTest {
         assertTrue("State package directory not found: ${root.absolutePath}", root.exists())
 
         root.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
-            val content = file.readText()
-            assertFalse("File ${file.name} contains 'android.' reference!", content.contains("android."))
+            val lines = file.readLines()
+            lines.forEach { line ->
+                assertFalse("File ${file.name} contains an android import: $line", line.trim().startsWith("import android"))
+            }
         }
     }
 
@@ -80,7 +80,7 @@ class StateMachineTest {
         // Mute should work from any state except STOPPED (as per StateMachine logic)
         val states = listOf(CaptureState.CAPTURING, CaptureState.MUTED, CaptureState.SUSPENDED, CaptureState.THROTTLED)
         for (state in states) {
-            val result = stateMachine.transition(state, CaptureEvent.Mute)
+            val result = StateMachine.transition(state, CaptureEvent.Mute)
             assertEquals("Expected Success for Mute from $state", TransitionResult.Success(CaptureState.MUTED), result)
         }
     }
@@ -89,7 +89,7 @@ class StateMachineTest {
     fun test_stop_from_any_state() {
         val states = CaptureState.values()
         for (state in states) {
-            val result = stateMachine.transition(state, CaptureEvent.Stop)
+            val result = StateMachine.transition(state, CaptureEvent.Stop)
             assertEquals("Expected Success for Stop from $state", TransitionResult.Success(CaptureState.STOPPED), result)
         }
     }

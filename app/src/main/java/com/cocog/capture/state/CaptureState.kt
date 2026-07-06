@@ -9,14 +9,14 @@ enum class CaptureState {
 }
 
 sealed class CaptureEvent {
-    object Start : CaptureEvent()
-    object Stop : CaptureEvent()
-    object Mute : CaptureEvent()
-    object Unmute : CaptureEvent()
-    object MicContentionDetected : CaptureEvent()
-    object MicContentionResolved : CaptureEvent()
-    object ThermalSevere : CaptureEvent()
-    object ThermalRecovered : CaptureEvent()
+    data object Start : CaptureEvent()
+    data object Stop : CaptureEvent()
+    data object Mute : CaptureEvent()
+    data object Unmute : CaptureEvent()
+    data object MicContentionDetected : CaptureEvent()
+    data object MicContentionResolved : CaptureEvent()
+    data object ThermalSevere : CaptureEvent()
+    data object ThermalRecovered : CaptureEvent()
 }
 
 sealed class TransitionResult {
@@ -24,7 +24,7 @@ sealed class TransitionResult {
     data class IllegalTransition(val currentState: CaptureState, val event: CaptureEvent) : TransitionResult()
 }
 
-class StateMachine {
+object StateMachine {
     fun transition(currentState: CaptureState, event: CaptureEvent): TransitionResult {
         // D7 & D10: High priority events that work from almost anywhere.
         if (event is CaptureEvent.Stop) return TransitionResult.Success(CaptureState.STOPPED)
