@@ -101,16 +101,21 @@ class CaptureService : Service() {
      *
      * The STOPPED target is special: a stopped/tearing-down service isn't foreground and
      * has no notification to keep truthful, so instead of rendering "Stopped" we cancel the
-     * standing notification outright (see [updateNotification]/[cancelNotification]). This
-     * also keeps a bare, context-less instance safe to call (no [getSystemService] happens
-     * for a state that only clears the notification) — see [ServiceHoldsMicrophoneTest]'s
-     * `onDestroyReleasesMic`, which relies on `onDestroy()` being callable on such an
-     * instance.
+     * standing notification (see [cancelNotification]) rather than leave a stale one behind.
+     *
+     * Both branches below are guarded by [baseContext] being non-null: a real Android-launched
+     * instance always has one (the framework attaches it before `onCreate()`), but a bare
+     * `CaptureService()` built directly in a test does not, and any [getSystemService] call on
+     * such an instance throws `NullPointerException`. [ServiceHoldsMicrophoneTest]'s
+     * `onDestroyReleasesMic` relies on `onDestroy()` — and therefore this method, via the
+     * `Stop` event — being callable on exactly such a context-less instance, so neither branch
+     * may touch `getSystemService` when there's no context to back it.
      */
     fun processEvent(event: CaptureEvent) {
         val result = StateMachine.transition(currentState, event)
         if (result is TransitionResult.Success) {
             currentState = result.newState
+            if (baseContext == null) return
             if (currentState == CaptureState.STOPPED) {
                 cancelNotification()
             } else {
