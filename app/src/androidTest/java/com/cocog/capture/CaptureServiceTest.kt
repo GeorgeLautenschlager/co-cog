@@ -20,8 +20,25 @@ class CaptureServiceTest {
     fun grantPermissions() {
         // Grant POST_NOTIFICATIONS for API 33+ via shell command to ensure it works in instrumented tests.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            InstrumentationRegistry.getInstrumentation().getUiAutomation().executeShellCommand("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
+            InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
+                "pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS",
+            )
+            // Let the grant settle before the test posts anything (same pattern as
+            // ServiceHoldsMicrophoneTest's RECORD_AUDIO grant).
+            waitFor(timeoutMs = 3_000) {
+                context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
         }
+    }
+
+    private inline fun waitFor(timeoutMs: Long, condition: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return true
+            Thread.sleep(25)
+        }
+        return condition()
     }
 
     @Test
