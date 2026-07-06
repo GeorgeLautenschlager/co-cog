@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
@@ -17,9 +18,7 @@ import com.cocog.capture.state.CaptureState
 import com.cocog.capture.state.StateMachine
 import com.cocog.capture.state.TransitionResult
 
-/**
- * Foreground microphone-service skeleton.
- */
+/** T1/T2: Foreground microphone service skeleton. */
 class CaptureService : Service() {
 
     private val metrics: MetricsSink = LogcatMetricsSink()
@@ -35,28 +34,11 @@ class CaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Handle event processing via Intents for testing and future extensibility.
-        if (intent?.action == ACTION_PROCESS_EVENT) {
-            val eventName = intent.getStringExtra(EXTRA_EVENT_NAME)
-            val event = when (eventName) {
-                "Start" -> CaptureEvent.Start
-                "Stop" -> CaptureEvent.Stop
-                "Mute" -> CaptureEvent.Mute
-                "Unmute" -> CaptureEvent.Unmute
-                "MicContentionDetected" -> CaptureEvent.MicContentionDetected
-                "MicContentionResolved" -> CaptureEvent.MicContentionResolved
-                "ThermalSevere" -> CaptureEvent.ThermalSevere
-                "ThermalRecovered" -> CaptureEvent.ThermalRecovered
-                else -> null
-            }
-            if (event != null) {
-                processEvent(event)
-            }
-            return START_STICKY
-        }
-
         if (!Permissions.hasAll(this)) {
             // Refuse: do not go foreground, do not open the mic, self-stop.
+            // D18 contract: The service must refuse to start if it does not have all 
+            // required permissions (RECORD_AUDIO and battery exemption). This prevents 
+            // unauthorized microphone access and ensures compliance with privacy requirements.
             lastStartRefused = true
             metrics.event(
                 "capture_start_refused",
@@ -91,30 +73,31 @@ class CaptureService : Service() {
         val result = StateMachine.transition(currentState, event)
         if (result is TransitionResult.Success) {
             currentState = result.newState
-            updateNotification()
+            // Skip rendering if we are transitioning to STOPPED to avoid NPEs in onDestroy() 
+            // on context-less instances and because a stopped service has no foreground notification.
+            if (currentState != CaptureState.STOPPED) {
+                updateNotification()
+            }
         }
     }
 
     private fun goForeground() {
-        updateNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIFICATION_ID, buildNotification())
-        }
-        holdMicrophone()
-    }
-
-    /** Updates the foreground notification to reflect the current state. */
-    private fun updateNotification() {
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        holdMicrophone()
     }
 
+    /** Updates the foreground notification to reflect the current state. */
+    private fun updateNotification() {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, buildNotification())
+    }
+
+    /** Acquires the microphone via AudioRecord. */
     private fun holdMicrophone() {
         if (audioRecord != null) return
 
@@ -151,6 +134,7 @@ class CaptureService : Service() {
         metrics.event("capture_mic_open")
     }
 
+    /** Releases the microphone and cleans up resources. */
     private fun releaseMicrophone() {
         val record = audioRecord ?: return
         audioRecord = null
@@ -185,25 +169,32 @@ class CaptureService : Service() {
             .build()
     }
 
+    /** Test seam: manually trigger microphone acquisition for testing purposes. */
     @VisibleForTesting
     fun holdMicrophoneForTest() = holdMicrophone()
 
+    /** Test seam: manually trigger microphone release for testing purposes. */
     @VisibleForTesting
     fun releaseMicrophoneForTest() = releaseMicrophone()
 
+    /** Test seam: check if the microphone is currently held. */
     @VisibleForTesting
     fun isMicHeld(): Boolean = audioRecord != null
+
+    /** Test seam: attach a real Context so notification APIs work on a manually-constructed instance. */
+    @VisibleForTesting
+    fun attachContextForTest(context: Context) = attachBaseContext(context)
 
     companion object {
         const val CHANNEL_ID = "cocog.capture"
         const val NOTIFICATION_ID = 1
-        const val ACTION_PROCESS_EVENT = "com.cocog.capture.ACTION_PROCESS_EVENT"
-        const val EXTRA_EVENT_NAME = "extra_event_name"
+        // ACTION_PROCESS_EVENT and EXTRA_EVENT_NAME are no longer used for routing.
 
         private const val SAMPLE_RATE_HZ = 16_000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT
 
+        /** Flag indicating if the last attempt to start the service was refused due to missing permissions (D18). */
         @JvmStatic
         @Volatile
         @VisibleForTesting

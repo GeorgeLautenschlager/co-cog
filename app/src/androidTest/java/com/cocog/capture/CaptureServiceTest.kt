@@ -2,10 +2,11 @@ package com.cocog.capture
 
 import android.app.NotificationManager
 import android.content.Context
-import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -15,50 +16,53 @@ class CaptureServiceTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-    @Test
-    fun testAllStatesReflectedInNotification() {
-        val intent = Intent(context, CaptureService::class.java)
-        context.startForegroundService(intent)
-
-        // Wait for service to start and reach CAPTURING state
-        Thread.sleep(1000)
-
-        assertNotificationText("Capturing")
-
-        sendEvent("Mute")
-        Thread.sleep(500)
-        assertNotificationText("Muted")
-
-        sendEvent("Unmute")
-        Thread.sleep(500)
-        assertNotificationText("Capturing")
-
-        sendEvent("MicContentionDetected")
-        Thread.sleep(500)
-        assertNotificationText("Paused — call in progress")
-
-        sendEvent("MicContentionResolved")
-        Thread.sleep(500)
-        assertNotificationText("Capturing")
-
-        sendEvent("ThermalSevere")
-        Thread.sleep(500)
-        assertNotificationText("Paused — device too warm")
-
-        sendEvent("ThermalRecovered")
-        Thread.sleep(500)
-        assertNotificationText("Capturing")
-
-        // Stop the service
-        context.stopService(intent)
+    @Before
+    fun grantPermissions() {
+        // Grant POST_NOTIFICATIONS for API 33+ via shell command to ensure it works in instrumented tests.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            InstrumentationRegistry.getInstrumentation().getUiAutomation().executeShellCommand("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
+        }
     }
 
-    private fun sendEvent(eventName: String) {
-        val intent = Intent(context, CaptureService::class.java).apply {
-            action = CaptureService.ACTION_PROCESS_EVENT
-            putExtra(CaptureService.EXTRA_EVENT_NAME, eventName)
-        }
-        context.startForegroundService(intent)
+    @Test
+    fun testAllStatesReflectedInNotification() {
+        val service = CaptureService()
+        service.attachContextForTest(context)
+
+        // Initial state is STOPPED, no notification should be present (per fix B2).
+        assertNoNotification()
+
+        // Start -> CAPTURING
+        service.processEvent(com.cocog.capture.state.CaptureEvent.Start)
+        assertNotificationText("Capturing")
+
+        // Mute
+        service.processEvent(com.cocog.capture.state.CaptureEvent.Mute)
+        assertNotificationText("Muted")
+
+        // Unmute -> CAPTURING
+        service.processEvent(com.cocog.capture.state.CaptureEvent.Unmute)
+        assertNotificationText("Capturing")
+
+        // MicContentionDetected -> SUSPENDED
+        service.processEvent(com.cocog.capture.state.CaptureEvent.MicContentionDetected)
+        assertNotificationText("Paused — call in progress")
+
+        // MicContentionResolved -> CAPTURING
+        service.processEvent(com.cocog.capture.state.CaptureEvent.MicContentionResolved)
+        assertNotificationText("Capturing")
+
+        // ThermalSevere -> THROTTLED
+        service.processEvent(com.cocog.capture.state.CaptureEvent.ThermalSevere)
+        assertNotificationText("Paused — device too warm")
+
+        // ThermalRecovered -> CAPTURING
+        service.processEvent(com.cocog.capture.state.CaptureEvent.ThermalRecovered)
+        assertNotificationText("Capturing")
+
+        // Stop -> STOPPED (no notification should be present)
+        service.processEvent(com.cocog.capture.state.CaptureEvent.Stop)
+        assertNoNotification()
     }
 
     private fun assertNotificationText(expectedText: String) {
@@ -74,5 +78,14 @@ class CaptureServiceTest {
             }
         }
         assertEquals("Expected notification text to be '$expectedText'", true, foundMatch)
+    }
+
+    private fun assertNoNotification() {
+        val activeNotifications = notificationManager.activeNotifications
+        for (notification in activeNotifications) {
+            if (notification.id == CaptureService.NOTIFICATION_ID) {
+                throw AssertionError("Expected no notification with ID ${CaptureService.NOTIFICATION_ID}, but found one.")
+            }
+        }
     }
 }
