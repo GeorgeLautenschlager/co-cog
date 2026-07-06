@@ -45,34 +45,54 @@ class ServiceHoldsMicrophoneTest {
     fun serviceHoldsMicThenReleasesIt() {
         val service = CaptureService()
 
-        CaptureService.micHeld = false
         service.holdMicrophoneForTest()
         assertTrue(
             "service should hold the microphone once foregrounded",
-            CaptureService.micHeld,
+            service.isMicHeld(),
         )
 
         service.releaseMicrophoneForTest()
         assertFalse(
             "service should release the microphone when it stops",
-            CaptureService.micHeld,
+            service.isMicHeld(),
         )
+    }
+
+    /**
+     * The load-bearing wiring: [CaptureService.onDestroy] — the single teardown funnel for
+     * every stop path (external stopService, self-stop on mic error) — must release the mic.
+     * The other tests drive the release *seam* directly; this one drives the real lifecycle
+     * callback so a future refactor that drops the release from onDestroy is caught.
+     *
+     * (An unrooted instrumented test can't run the full permissioned start, so we can't use a
+     * lifecycle controller to reach onDestroy; we hold via the seam and then invoke the real
+     * onDestroy() callback. Service.onDestroy()'s base implementation is a no-op, so calling
+     * it on a bare instance is safe.)
+     */
+    @Test
+    fun onDestroyReleasesMic() {
+        val service = CaptureService()
+
+        service.holdMicrophoneForTest()
+        assertTrue("mic held before teardown", service.isMicHeld())
+
+        service.onDestroy()
+        assertFalse("onDestroy must release the microphone", service.isMicHeld())
     }
 
     @Test
     fun holdingMicIsIdempotent() {
         val service = CaptureService()
 
-        CaptureService.micHeld = false
         service.holdMicrophoneForTest()
         // A redelivered start (START_STICKY) must not stack a second recorder; the second
         // hold is a no-op and the mic stays held.
         service.holdMicrophoneForTest()
-        assertTrue("mic should still be held after a redundant hold", CaptureService.micHeld)
+        assertTrue("mic should still be held after a redundant hold", service.isMicHeld())
 
         // A single release frees it (no leaked recorder from the redundant hold).
         service.releaseMicrophoneForTest()
-        assertFalse("one release should fully free the mic", CaptureService.micHeld)
+        assertFalse("one release should fully free the mic", service.isMicHeld())
     }
 
     private inline fun waitFor(timeoutMs: Long, condition: () -> Boolean): Boolean {

@@ -123,7 +123,6 @@ class CaptureService : Service() {
         }
 
         audioRecord = record
-        micHeld = true
         metrics.event("capture_mic_open")
     }
 
@@ -140,7 +139,6 @@ class CaptureService : Service() {
             metrics.event("capture_mic_error", mapOf("reason" to "stop_failed"))
         }
         record.release()
-        micHeld = false
         metrics.event("capture_mic_closed")
     }
 
@@ -171,6 +169,14 @@ class CaptureService : Service() {
     @VisibleForTesting
     fun releaseMicrophoneForTest() = releaseMicrophone()
 
+    /**
+     * Test seam: whether the microphone is currently held. Derived directly from the live
+     * instance state ([audioRecord]) rather than a mirrored flag, so it cannot drift out of
+     * sync with the actual hold and a START_STICKY restart cannot read stale state.
+     */
+    @VisibleForTesting
+    fun isMicHeld(): Boolean = audioRecord != null
+
     companion object {
         const val CHANNEL_ID = "cocog.capture"
         const val NOTIFICATION_ID = 1
@@ -190,15 +196,5 @@ class CaptureService : Service() {
         @Volatile
         @VisibleForTesting
         var lastStartRefused: Boolean = false
-
-        /**
-         * True while the service is actively holding an open, recording [AudioRecord].
-         * Exposed so an instrumented test can verify the mic is held while foregrounded
-         * and released on stop. Reflects live state; not a general-purpose signal.
-         */
-        @JvmStatic
-        @Volatile
-        @VisibleForTesting
-        var micHeld: Boolean = false
     }
 }
