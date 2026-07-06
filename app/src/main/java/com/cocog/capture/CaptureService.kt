@@ -12,18 +12,13 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import androidx.annotation.VisibleForTesting
+import com.cocog.capture.state.CaptureEvent
+import com.cocog.capture.state.CaptureState
+import com.cocog.capture.state.StateMachine
+import com.cocog.capture.state.TransitionResult
 
 /**
  * Foreground microphone-service skeleton.
- *
- * - T1 scope: it must REFUSE to start while half-permissioned (D18) — never touch the
- *   microphone without full consent.
- * - T2 scope: when it *does* go foreground (fully permissioned), it opens an
- *   [AudioRecord] and holds the microphone open for the service's lifetime — no reading,
- *   no processing, no buffering, just holding the mic — and releases it cleanly whenever
- *   the service stops so the OS mic indicator behaves correctly.
- *
- * Real audio capture (draining the record, ring buffer, VAD) arrives in later wave tasks.
  */
 class CaptureService : Service() {
 
@@ -32,19 +27,36 @@ class CaptureService : Service() {
     /** The held microphone. Non-null only while foregrounded; released on stop. */
     private var audioRecord: AudioRecord? = null
 
+    /** Current state of the capture session. */
+    @get:VisibleForTesting
+    var currentState: CaptureState = CaptureState.STOPPED
+        private set
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Handle event processing via Intents for testing and future extensibility.
+        if (intent?.action == ACTION_PROCESS_EVENT) {
+            val eventName = intent.getStringExtra(EXTRA_EVENT_NAME)
+            val event = when (eventName) {
+                "Start" -> CaptureEvent.Start
+                "Stop" -> CaptureEvent.Stop
+                "Mute" -> CaptureEvent.Mute
+                "Unmute" -> CaptureEvent.Unmute
+                "MicContentionDetected" -> CaptureEvent.MicContentionDetected
+                "MicContentionResolved" -> CaptureEvent.MicContentionResolved
+                "ThermalSevere" -> CaptureEvent.ThermalSevere
+                "ThermalRecovered" -> CaptureEvent.ThermalRecovered
+                else -> null
+            }
+            if (event != null) {
+                processEvent(event)
+            }
+            return START_STICKY
+        }
+
         if (!Permissions.hasAll(this)) {
             // Refuse: do not go foreground, do not open the mic, self-stop.
-            //
-            // Contract (T1): this refusal path assumes the service was started with a
-            // plain startService(). It must NOT be launched via startForegroundService()
-            // while half-permissioned — that path requires a startForeground() call within
-            // ~5s, but a microphone-typed startForeground() itself requires RECORD_AUDIO,
-            // so there is no valid foreground call to make when half-permissioned. The
-            // onboarding gate enforces this (the Start affordance only appears fully
-            // permissioned). T2, which wires the real service start, owns hardening this.
             lastStartRefused = true
             metrics.event(
                 "capture_start_refused",
@@ -58,6 +70,8 @@ class CaptureService : Service() {
         }
 
         lastStartRefused = false
+        // Drive the state machine from STOPPED -> CAPTURING via Start event.
+        processEvent(CaptureEvent.Start)
         goForeground()
         metrics.event("capture_started")
         return START_STICKY
@@ -65,31 +79,42 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         // Also covers the mic-error self-stop and any external stopService/stopSelf:
-        // onDestroy is the single funnel where the OS tears the service down.
+        processEvent(CaptureEvent.Stop)
         releaseMicrophone()
         super.onDestroy()
     }
 
+    /**
+     * Processes a [CaptureEvent], updates the current state, and re-renders the notification.
+     */
+    fun processEvent(event: CaptureEvent) {
+        val result = StateMachine.transition(currentState, event)
+        if (result is TransitionResult.Success) {
+            currentState = result.newState
+            updateNotification()
+        }
+    }
+
     private fun goForeground() {
+        updateNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        }
+        holdMicrophone()
+    }
+
+    /** Updates the foreground notification to reflect the current state. */
+    private fun updateNotification() {
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        // Only after the microphone-typed FGS is established may we lawfully hold the mic.
-        holdMicrophone()
     }
 
-    /**
-     * Open an [AudioRecord] and start it so the microphone is actively held for the
-     * service's lifetime. We never read from it — T2 only holds the mic; draining and
-     * processing belong to the later audio-engine task (T7). Idempotent: a redelivered
-     * start (START_STICKY) must not stack a second recorder.
-     *
-     * Format (ledger L1, decided before T2): 16 kHz mono 16-bit PCM from the
-     * VOICE_RECOGNITION source — a placeholder until T7 owns the real D2/D3 format.
-     */
     private fun holdMicrophone() {
         if (audioRecord != null) return
 
@@ -126,7 +151,6 @@ class CaptureService : Service() {
         metrics.event("capture_mic_open")
     }
 
-    /** Stop and release the held microphone, if any. Safe to call more than once. */
     private fun releaseMicrophone() {
         val record = audioRecord ?: return
         audioRecord = null
@@ -135,7 +159,6 @@ class CaptureService : Service() {
                 record.stop()
             }
         } catch (e: IllegalStateException) {
-            // Best-effort stop; release below still frees the mic.
             metrics.event("capture_mic_error", mapOf("reason" to "stop_failed"))
         }
         record.release()
@@ -147,51 +170,40 @@ class CaptureService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Capture", NotificationManager.IMPORTANCE_LOW),
         )
+        val text = when (currentState) {
+            CaptureState.STOPPED -> "Stopped"
+            CaptureState.CAPTURING -> "Capturing"
+            CaptureState.MUTED -> "Muted"
+            CaptureState.SUSPENDED -> "Paused — call in progress"
+            CaptureState.THROTTLED -> "Paused — device too warm"
+        }
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("co-cog")
-            .setContentText("Capturing")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.presence_audio_online)
             .setOngoing(true)
             .build()
     }
 
-    /**
-     * Test seam: open the microphone as the foreground path would. Exposed because the
-     * full permissioned start can't be reached in an unrooted instrumented test (the D18
-     * gate's battery-exemption leg cannot be granted programmatically), so a test grants
-     * only RECORD_AUDIO and drives the mic-hold unit directly. The refusal gate itself is
-     * covered by [ServiceRefusesHalfPermissionedTest].
-     */
     @VisibleForTesting
     fun holdMicrophoneForTest() = holdMicrophone()
 
-    /** Test seam: release the microphone as a service stop would. See [holdMicrophoneForTest]. */
     @VisibleForTesting
     fun releaseMicrophoneForTest() = releaseMicrophone()
 
-    /**
-     * Test seam: whether the microphone is currently held. Derived directly from the live
-     * instance state ([audioRecord]) rather than a mirrored flag, so it cannot drift out of
-     * sync with the actual hold and a START_STICKY restart cannot read stale state.
-     */
     @VisibleForTesting
     fun isMicHeld(): Boolean = audioRecord != null
 
     companion object {
         const val CHANNEL_ID = "cocog.capture"
         const val NOTIFICATION_ID = 1
+        const val ACTION_PROCESS_EVENT = "com.cocog.capture.ACTION_PROCESS_EVENT"
+        const val EXTRA_EVENT_NAME = "extra_event_name"
 
-        // Microphone hold format (ledger L1) — placeholder until T7 owns the real format.
         private const val SAMPLE_RATE_HZ = 16_000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT
 
-        /**
-         * Set true when the most recent start attempt was refused for being
-         * half-permissioned. Exposed so an instrumented test can verify the D18
-         * refusal contract without opening the microphone. Single-shot test aid —
-         * reflects only the last start; not a general-purpose signal.
-         */
         @JvmStatic
         @Volatile
         @VisibleForTesting
