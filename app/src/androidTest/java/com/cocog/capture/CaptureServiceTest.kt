@@ -5,11 +5,21 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
+/**
+ * T4 contract: [CaptureService.processEvent] keeps the persistent notification's text in
+ * sync with the T3 state machine (D17). Drives all 5 states through the real production
+ * method on a bare, context-attached instance (see [CaptureService.attachContextForTest]) —
+ * not through a real permissioned `startForegroundService()` start, since the D18 gate's
+ * battery-exemption leg can't be granted programmatically in an unrooted instrumented test
+ * (same constraint [ServiceHoldsMicrophoneTest] documents). That means this test does not
+ * exercise `goForeground()`'s own `startForeground()` call directly — [ServiceHoldsMicrophoneTest]
+ * already covers `goForeground`/mic-hold; this test is scoped to the state→notification binding.
+ */
 @RunWith(AndroidJUnit4::class)
 class CaptureServiceTest {
 
@@ -82,27 +92,35 @@ class CaptureServiceTest {
         assertNoNotification()
     }
 
+    /**
+     * `notify()`/`cancel()` cross a binder call to the system server; `activeNotifications`
+     * reads back from it and isn't guaranteed to reflect a call that just returned. Poll
+     * (same `waitFor` pattern as the permission grant above) instead of asserting
+     * synchronously, so this doesn't flake on a slower device — this also matches D17's own
+     * "within 1 s" framing.
+     */
     private fun assertNotificationText(expectedText: String) {
-        val activeNotifications = notificationManager.activeNotifications
-        var foundMatch = false
-        for (notification in activeNotifications) {
-            if (notification.id == CaptureService.NOTIFICATION_ID) {
-                val actualText = notification.notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString()
-                if (actualText == expectedText) {
-                    foundMatch = true
-                    break
-                }
-            }
+        var lastSeenTexts: List<String?> = emptyList()
+        val matched = waitFor(timeoutMs = 1_000) {
+            val texts = notificationManager.activeNotifications
+                .filter { it.id == CaptureService.NOTIFICATION_ID }
+                .map { it.notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString() }
+            lastSeenTexts = texts
+            texts.any { it == expectedText }
         }
-        assertEquals("Expected notification text to be '$expectedText'", true, foundMatch)
+        assertTrue(
+            "Expected notification text '$expectedText', last saw $lastSeenTexts",
+            matched,
+        )
     }
 
     private fun assertNoNotification() {
-        val activeNotifications = notificationManager.activeNotifications
-        for (notification in activeNotifications) {
-            if (notification.id == CaptureService.NOTIFICATION_ID) {
-                throw AssertionError("Expected no notification with ID ${CaptureService.NOTIFICATION_ID}, but found one.")
-            }
+        val cleared = waitFor(timeoutMs = 1_000) {
+            notificationManager.activeNotifications.none { it.id == CaptureService.NOTIFICATION_ID }
         }
+        assertTrue(
+            "Expected no notification with ID ${CaptureService.NOTIFICATION_ID}, but one was still active",
+            cleared,
+        )
     }
 }

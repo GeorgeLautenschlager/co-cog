@@ -75,8 +75,12 @@ class CaptureService : Service() {
         }
 
         lastStartRefused = false
-        // Drive the state machine from STOPPED -> CAPTURING before going foreground, so the
-        // very first notification goForeground() posts already carries the right text.
+        // Drive the state machine from STOPPED -> CAPTURING before going foreground, so
+        // buildNotification() already renders CAPTURING's text by the time goForeground()
+        // reads it. Note this means processEvent's own notify() briefly posts the
+        // notification first; goForeground()'s startForeground() re-posts the same id right
+        // after (same content) to make the promotion to a real foreground service — harmless,
+        // just not literally "the first post", despite how that might read at a glance.
         processEvent(CaptureEvent.Start)
         goForeground()
         metrics.event("capture_started")
